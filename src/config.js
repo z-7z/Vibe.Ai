@@ -52,7 +52,7 @@ function getEnvBoolean(name, defaultValue) {
 
 // Server configuration
 export const PORT = getEnvNumber('PORT', 3000);
-export const HOST = getEnv('HOST', '127.0.0.1');
+export const HOST = getEnv('HOST', '0.0.0.0');
 
 // API authentication
 export const API_KEY = getEnv('VIBE_API_KEY', '').trim();
