@@ -12,15 +12,52 @@ import { JSDOM } from 'jsdom';
 const DEFAULT_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
   + '(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36';
 
+// Default timeout for challenge solving (20 seconds)
+const DEFAULT_SOLVE_TIMEOUT = 20000;
+
 /**
  * Solves a DuckAI challenge script and returns the proof material.
  * 
  * @param {string} jsSource - The challenge JavaScript code from DuckAI
  * @param {string} [userAgent=DEFAULT_UA] - User agent string to use
+ * @param {number} [timeout=DEFAULT_SOLVE_TIMEOUT] - Timeout in milliseconds
  * @returns {Promise<Object>} The solved challenge result with server_hashes, client_hashes, signals, and meta
- * @throws {Error} If the challenge cannot be solved
+ * @throws {Error} If the challenge cannot be solved or times out
  */
-export async function solveChallenge(jsSource, userAgent = DEFAULT_UA) {
+export async function solveChallenge(jsSource, userAgent = DEFAULT_UA, timeout = DEFAULT_SOLVE_TIMEOUT) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    // Create a promise that can be aborted
+    const solvePromise = _solveChallengeInternal(jsSource, userAgent);
+    
+    // Race between the solve promise and timeout
+    const result = await Promise.race([
+      solvePromise,
+      new Promise((_, reject) => {
+        controller.signal.addEventListener('abort', () => {
+          reject(new Error(`Challenge solving timeout after ${timeout}ms`));
+        });
+      })
+    ]);
+    
+    clearTimeout(timeoutId);
+    return result;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    throw error;
+  }
+}
+
+/**
+ * Internal function to solve the challenge without timeout
+ * 
+ * @param {string} jsSource - The challenge JavaScript code
+ * @param {string} userAgent - User agent string
+ * @returns {Promise<Object>} Solved challenge result
+ */
+async function _solveChallengeInternal(jsSource, userAgent) {
   const dom = new JSDOM('<!doctype html><html><body></body></html>', {
     url: 'https://duck.ai/',
     userAgent: userAgent,
@@ -104,7 +141,11 @@ export async function solveChallenge(jsSource, userAgent = DEFAULT_UA) {
     throw new Error(`Challenge solver failed: ${errorMessage}`);
   } finally {
     // Clean up the DOM to free memory
-    dom.window.close();
+    try {
+      dom.window.close();
+    } catch (e) {
+      // Ignore cleanup errors
+    }
   }
 }
 
@@ -143,4 +184,4 @@ export function buildProof(solved, origin = 'https://duck.ai') {
   return Buffer.from(proofJson, 'utf8').toString('base64');
 }
 
-export { DEFAULT_UA };
+export { DEFAULT_UA, DEFAULT_SOLVE_TIMEOUT };

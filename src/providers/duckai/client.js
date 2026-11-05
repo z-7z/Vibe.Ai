@@ -7,12 +7,14 @@
  * @module providers/duckai/client
  */
 
-import { solveChallenge, buildProof, DEFAULT_UA } from './challenge.js';
+import { solveChallenge, buildProof, DEFAULT_UA, DEFAULT_SOLVE_TIMEOUT } from './challenge.js';
 import { resolveModel, DEFAULT_MODEL } from './models.js';
 
 const BASE = 'https://duck.ai';
 const MAX_RETRIES = 4;
 const RETRY_DELAY_BASE = 2000; // 2 seconds base delay
+const REQUEST_TIMEOUT = 30000; // 30 seconds timeout for individual requests
+const SOLVE_TIMEOUT = 20000; // 20 seconds timeout for challenge solving
 
 /**
  * DuckAI Client Error
@@ -26,12 +28,40 @@ export class DuckAIError extends Error {
 }
 
 /**
+ * Create a fetch request with timeout support
+ * 
+ * @param {string} url - URL to fetch
+ * @param {Object} options - Fetch options
+ * @param {number} timeout - Timeout in milliseconds
+ * @returns {Promise<Response>} Fetch response
+ */
+async function fetchWithTimeout(url, options = {}, timeout = REQUEST_TIMEOUT) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error(`Request timeout after ${timeout}ms`);
+    }
+    throw error;
+  }
+}
+
+/**
  * DuckAI Client for interacting with DuckDuckGo's chat API
  */
 export class DuckAIClient {
   constructor(options = {}) {
     this.ua = options.userAgent || DEFAULT_UA;
-    this.timeout = options.timeout || 60000; // 60 seconds
+    this.timeout = options.timeout || 60000; // 60 seconds total
     this.feVersion = '';
     this.jsa = null;
     this.sessionId = options.sessionId || null;
@@ -45,14 +75,13 @@ export class DuckAIClient {
    */
   async bootstrap() {
     try {
-      const response = await fetch(`${BASE}/`, {
+      const response = await fetchWithTimeout(`${BASE}/`, {
         method: 'GET',
         headers: {
           'User-Agent': this.ua,
           'Accept-Language': 'en-US,en;q=0.9'
-        },
-        timeout: this.timeout
-      });
+        }
+      }, REQUEST_TIMEOUT);
 
       if (!response.ok) {
         throw new DuckAIError(
@@ -87,7 +116,7 @@ export class DuckAIClient {
     }
 
     try {
-      const response = await fetch(`${BASE}/duckchat/v1/status`, {
+      const response = await fetchWithTimeout(`${BASE}/duckchat/v1/status`, {
         method: 'GET',
         headers: {
           'x-vqd-accept': '1',
@@ -96,9 +125,8 @@ export class DuckAIClient {
           'Origin': BASE,
           'Referer': `${BASE}/`,
           'User-Agent': this.ua
-        },
-        timeout: this.timeout
-      });
+        }
+      }, REQUEST_TIMEOUT);
 
       if (!response.ok) {
         throw new DuckAIError(
@@ -122,6 +150,21 @@ export class DuckAIClient {
   }
 
   /**
+   * Solve a challenge with timeout
+   * 
+   * @param {string} jsSource - The challenge JavaScript code
+   * @returns {Promise<Object>} Solved challenge result
+   */
+  async solveChallengeWithTimeout(jsSource) {
+    try {
+      // Call solveChallenge with timeout
+      return await solveChallenge(jsSource, this.ua, SOLVE_TIMEOUT);
+    } catch (error) {
+      throw new DuckAIError(`Challenge solving failed: ${error.message}`);
+    }
+  }
+
+  /**
    * Solve a challenge and build the proof
    * This combines steps 3 and 4 of the DuckAI protocol
    * 
@@ -129,7 +172,7 @@ export class DuckAIClient {
    * @returns {Promise<string>} The base64-encoded proof for X-Vqd-Hash-1 header
    */
   async solveAndBuildProof(jsSource) {
-    const solved = await solveChallenge(jsSource, this.ua);
+    const solved = await this.solveChallengeWithTimeout(jsSource);
     this.jsa = buildProof(solved, BASE);
     return this.jsa;
   }
@@ -175,7 +218,7 @@ export class DuckAIClient {
     const signalsBase64 = Buffer.from(signalsJson, 'utf8').toString('base64');
 
     try {
-      const response = await fetch(`${BASE}/duckchat/v1/chat`, {
+      const response = await fetchWithTimeout(`${BASE}/duckchat/v1/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -187,9 +230,8 @@ export class DuckAIClient {
           'X-Vqd-Hash-1': this.jsa,
           'User-Agent': this.ua
         },
-        body: JSON.stringify(body),
-        timeout: this.timeout
-      });
+        body: JSON.stringify(body)
+      }, REQUEST_TIMEOUT);
 
       return response;
     } catch (error) {
@@ -323,4 +365,4 @@ export class DuckAIClient {
   }
 }
 
-export { BASE, MAX_RETRIES, DEFAULT_UA };
+export { BASE, MAX_RETRIES, DEFAULT_UA, REQUEST_TIMEOUT, SOLVE_TIMEOUT };
