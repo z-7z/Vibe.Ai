@@ -1,0 +1,44 @@
+{
+  "name": "vibe-ai",
+  "version": "1.0.0",
+  "description": "Vibe.Ai - Node.js migration of DuckAI with OpenAI-compatible API",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node src/test.js"
+  },
+  "keywords": [
+    "ai",
+    "duckai",
+    "openai",
+    "api",
+    "nodejs",
+    "llm",
+    "chat",
+    "completion"
+  ],
+  "author": "Mistral AI And Zeox",
+  "license": "0BSD",
+  "homepage": "https://ai.zeox.xyz",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/z-7z/Vibe.Ai"
+  },
+  "bugs": {
+    "url": "https://github.com/z-7z/Vibe.Ai/issues"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "jsdom": "^25.0.1",
+    "uuid": "^10.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}

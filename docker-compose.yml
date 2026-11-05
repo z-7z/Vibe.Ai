@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  vibe-ai:
+    build: .
+    container_name: vibe-ai
+    ports:
+      - "3000:3000"
+    environment:
+      # Server configuration
+      - PORT=3000
+      - HOST=0.0.0.0
+      
+      # Optional API key (uncomment to enable authentication)
+      # - VIBE_API_KEY=your-secret-key
+      
+      # Rate limiting
+      - VIBE_RATE_LIMIT=60
+      - VIBE_RATE_LIMIT_WINDOW=60000
+      
+      # Request configuration
+      - VIBE_MAX_PROMPT_CHARS=15000
+      - VIBE_REQUEST_TIMEOUT=180000
+      - VIBE_UPSTREAM_MAX_CONCURRENT=1
+      
+      # Logging
+      - VIBE_LOG_LEVEL=info
+      - VIBE_CORS_ORIGIN=*
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', (res) => { if (res.statusCode !== 200) process.exit(1); res.on('data', () => {}); res.on('end', () => process.exit(0)); }).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+# For development with auto-reload
+# docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
