@@ -2,21 +2,28 @@
  * Vibe.Ai Server
  * 
  * Main entry point for the Vibe.Ai API server.
- * Implements OpenAI-compatible endpoints for DuckAI provider.
+ * Implements OpenAI-compatible endpoints for multiple AI providers.
  * 
  * @module index
  */
 
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { getProvider } from './providers/index.js';
+import { getProvider, getProviderNames, resolveModelToProvider } from './providers/index.js';
 import { rateLimiter, startRateLimitCleanup } from './middleware/index.js';
 import { authMiddleware } from './middleware/auth.js';
-import { PORT, HOST, isApiKeyRequired, UPSTREAM_MAX_CONCURRENT } from './config.js';
+import { 
+  PORT, 
+  HOST, 
+  isApiKeyRequired, 
+  UPSTREAM_MAX_CONCURRENT,
+  DEFAULT_PROVIDER,
+  hasProviderApiKey,
+  getProviderApiKey
+} from './config.js';
 import { buildPrompt, fitPrompt, processMessages } from './utils/prompt.js';
 import { createError, createValidationError, createAuthError, createNotFoundError, fromDuckAIError } from './utils/errors.js';
-import { getModels as getDuckAIModels, resolveModel, isModelSupported, SERVED_MODELS, DEFAULT_MODEL } from './providers/duckai/models.js';
-import { DuckAIClient, DuckAIError } from './providers/duckai/client.js';
+import { DuckAIError } from './providers/duckai/client.js';
 
 // Initialize Express app
 const app = express();
@@ -59,17 +66,15 @@ app.use((req, res, next) => {
   next();
 });
 
-// Upstream request serialization lock
-// DuckDuckGo's fraud score punishes bursts, so serialize upstream calls
+// Upstream request serialization locks
+// Serialize upstream calls per provider to prevent rate limiting
 const upstreamLocks = new Map();
 
 /**
  * Acquire a lock for a specific provider
- * Ensures only one upstream request per provider at a time
  */
 async function acquireUpstreamLock(providerName) {
   if (UPSTREAM_MAX_CONCURRENT <= 1) {
-    // Simple lock for single concurrent request
     if (!upstreamLocks.has(providerName)) {
       const lock = { promise: null, resolve: null };
       lock.promise = new Promise(resolve => { lock.resolve = resolve; });
@@ -81,8 +86,6 @@ async function acquireUpstreamLock(providerName) {
     return lock;
   }
   
-  // For multiple concurrent requests, use a semaphore
-  // This is a simplified implementation
   return { release: () => {} };
 }
 
@@ -108,35 +111,49 @@ function releaseUpstreamLock(providerName, lock) {
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    upstream: 'duck.ai',
     timestamp: Math.floor(Date.now() / 1000),
     version: '1.0.0',
-    provider: 'duckai'
+    providers: getProviderNames(),
+    defaultProvider: DEFAULT_PROVIDER
   });
 });
 
 app.get('/healthz', (req, res) => {
   res.json({
     status: 'ok',
-    upstream: 'duck.ai',
     timestamp: Math.floor(Date.now() / 1000),
     version: '1.0.0',
-    provider: 'duckai'
+    providers: getProviderNames(),
+    defaultProvider: DEFAULT_PROVIDER
   });
 });
 
 /**
  * GET /v1/models - List available models
- * Returns OpenAI-compatible model list
+ * Returns models from all configured providers or a specific provider
  */
 app.get('/v1/models', (req, res) => {
   try {
-    const models = getDuckAIModels();
+    const providerName = req.query.provider || DEFAULT_PROVIDER;
     
-    res.json({
-      object: 'list',
-      data: models
-    });
+    try {
+      const provider = getProvider(providerName);
+      const models = provider.getModels ? provider.getModels() : [];
+      
+      res.json({
+        object: 'list',
+        data: models,
+        provider: providerName
+      });
+    } catch (error) {
+      // If provider doesn't support listing models, return empty list
+      res.json({
+        object: 'list',
+        data: [],
+        provider: providerName,
+        error: error.message
+      });
+    }
   } catch (error) {
     console.error('Error listing models:', error);
     res.status(500).json(createError('Failed to list models'));
@@ -148,15 +165,55 @@ app.get('/v1/models', (req, res) => {
  */
 app.get('/models', (req, res) => {
   try {
-    const models = getDuckAIModels();
+    const providerName = req.query.provider || DEFAULT_PROVIDER;
     
-    res.json({
-      object: 'list',
-      data: models
-    });
+    try {
+      const provider = getProvider(providerName);
+      const models = provider.getModels ? provider.getModels() : [];
+      
+      res.json({
+        object: 'list',
+        data: models,
+        provider: providerName
+      });
+    } catch (error) {
+      res.json({
+        object: 'list',
+        data: [],
+        provider: providerName,
+        error: error.message
+      });
+    }
   } catch (error) {
     console.error('Error listing models:', error);
     res.status(500).json(createError('Failed to list models'));
+  }
+});
+
+/**
+ * GET /v1/providers - List available providers
+ */
+app.get('/v1/providers', (req, res) => {
+  try {
+    const providers = getProviderNames();
+    
+    const providerInfo = providers.map(name => {
+      const hasKey = hasProviderApiKey(name);
+      return {
+        id: name,
+        object: 'provider',
+        hasApiKey: hasKey,
+        isDefault: name === DEFAULT_PROVIDER
+      };
+    });
+    
+    res.json({
+      object: 'list',
+      data: providerInfo
+    });
+  } catch (error) {
+    console.error('Error listing providers:', error);
+    res.status(500).json(createError('Failed to list providers'));
   }
 });
 
@@ -190,22 +247,29 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     }
     
-    // Resolve model
+    // Get model and provider
     let model = body.model;
+    let providerName = body.provider || DEFAULT_PROVIDER;
+    
+    // If model is specified, try to resolve it to a provider
     if (model) {
-      model = resolveModel(model);
-      if (!isModelSupported(model)) {
-        return res.status(400).json(createValidationError(`Unsupported model: ${model}`));
-      }
-    } else {
-      model = DEFAULT_MODEL;
+      const resolved = resolveModelToProvider(model);
+      providerName = resolved.provider;
+      model = resolved.model;
+    }
+    
+    // Check if provider has API key configured (except duckai)
+    if (providerName !== 'duckai' && !hasProviderApiKey(providerName)) {
+      return res.status(400).json(createValidationError(
+        `Provider '${providerName}' requires API key. Set ${providerName.toUpperCase()}_API_KEY environment variable.`
+      ));
     }
     
     // Process messages and fit to limit
     const { prompt, fitted, originalLength, fittedLength } = processMessages(messages);
     
     // Log prompt information
-    console.log(`DuckAI prompt: ${originalLength} chars -> ${fittedLength} sent`);
+    console.log(`[${providerName}] Prompt: ${originalLength} chars -> ${fittedLength} sent`);
     
     // Check if streaming is requested
     const stream = body.stream === true;
@@ -214,21 +278,28 @@ app.post('/v1/chat/completions', async (req, res) => {
     const completionId = `chatcmpl-${uuidv4().replace(/-/g, '')}`;
     const created = Math.floor(Date.now() / 1000);
     
-    // Acquire upstream lock to serialize requests
-    const lock = await acquireUpstreamLock('duckai');
+    // Acquire upstream lock to serialize requests per provider
+    const lock = await acquireUpstreamLock(providerName);
     
     try {
-      const client = new DuckAIClient();
+      const provider = getProvider(providerName);
+      
+      // Create client with API key
+      const Client = provider.DuckAIClient || provider.MistralClient || 
+                     provider.GroqClient || provider.OpenRouterClient;
+      
+      const apiKey = getProviderApiKey(providerName);
+      const client = new Client({ apiKey });
       
       if (stream) {
         // Streaming response
-        await handleStreamingRequest(req, res, client, fitted, model, completionId, created);
+        await handleStreamingRequest(req, res, client, fitted, model, providerName, completionId, created);
       } else {
         // Non-streaming response
-        await handleNonStreamingRequest(res, client, fitted, model, completionId, created);
+        await handleNonStreamingRequest(res, client, fitted, model, providerName, completionId, created);
       }
     } finally {
-      releaseUpstreamLock('duckai', lock);
+      releaseUpstreamLock(providerName, lock);
     }
   } catch (error) {
     console.error('Error in chat completions:', error);
@@ -242,6 +313,11 @@ app.post('/v1/chat/completions', async (req, res) => {
       return res.status(400).json(createValidationError(error.message));
     }
     
+    if (error.name === 'MistralError' || error.name === 'GroqError' || error.name === 'OpenRouterError') {
+      const status = error.status || 502;
+      return res.status(status).json(createError(error.message, 'upstream_error', status));
+    }
+    
     res.status(500).json(createError('Internal server error'));
   }
 });
@@ -250,7 +326,6 @@ app.post('/v1/chat/completions', async (req, res) => {
  * POST /chat/completions - Alias for /v1/chat/completions
  */
 app.post('/chat/completions', async (req, res) => {
-  // Redirect to /v1/chat/completions
   req.url = '/v1/chat/completions';
   return app.handle(req, res);
 });
@@ -258,7 +333,7 @@ app.post('/chat/completions', async (req, res) => {
 /**
  * Handle streaming chat completion request
  */
-async function handleStreamingRequest(req, res, client, prompt, model, completionId, created) {
+async function handleStreamingRequest(req, res, client, prompt, model, providerName, completionId, created) {
   const startTime = Date.now();
   let chars = 0;
   
@@ -286,46 +361,95 @@ async function handleStreamingRequest(req, res, client, prompt, model, completio
     // Send initial assistant message
     send(chunk({ role: 'assistant', content: '' }));
     
-    // Stream the response
-    const responseStream = await client.chat(prompt, model);
+    // Get the response based on provider type
+    let responseStream;
+    
+    if (providerName === 'duckai') {
+      responseStream = await client.chat(prompt, model);
+    } else {
+      responseStream = await client.streamChatCompletion(prompt, { model });
+    }
     
     if (!responseStream.ok) {
       const errorText = await responseStream.text();
-      throw new DuckAIError(`Upstream error: ${responseStream.status} - ${errorText}`, responseStream.status);
+      throw new Error(`Upstream error: ${responseStream.status} - ${errorText}`);
     }
     
-    const reader = responseStream.body.getReader();
-    const decoder = new TextDecoder('utf-8');
-    
-    while (true) {
-      const { done, value } = await reader.read();
+    // Handle different streaming formats
+    if (providerName === 'duckai') {
+      // DuckAI uses SSE format
+      const reader = responseStream.body.getReader();
+      const decoder = new TextDecoder('utf-8');
       
-      if (done) {
-        break;
-      }
-      
-      const chunkText = decoder.decode(value, { stream: true });
-      const lines = chunkText.split('\n');
-      
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const data = line.slice(6);
-          
-          if (data === '[DONE]') {
-            continue;
-          }
-          
-          try {
-            const event = JSON.parse(data);
-            const message = event.message;
+      while (true) {
+        const { done, value } = await reader.read();
+        
+        if (done) {
+          break;
+        }
+        
+        const chunkText = decoder.decode(value, { stream: true });
+        const lines = chunkText.split('\n');
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
             
-            if (typeof message === 'string' && message) {
-              chars += message.length;
-              send(chunk({ content: message }));
+            if (data === '[DONE]') {
+              continue;
             }
-          } catch (e) {
-            // Ignore JSON parse errors
-            continue;
+            
+            try {
+              const event = JSON.parse(data);
+              const message = event.message;
+              
+              if (typeof message === 'string' && message) {
+                chars += message.length;
+                send(chunk({ content: message }));
+              }
+            } catch (e) {
+              continue;
+            }
+          }
+        }
+      }
+    } else {
+      // Other providers use standard OpenAI streaming
+      const reader = responseStream.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      
+      while (true) {
+        const { done, value } = await reader.read();
+        
+        if (done) {
+          break;
+        }
+        
+        const chunkText = decoder.decode(value, { stream: true });
+        const lines = chunkText.split('\n');
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            
+            if (data === '[DONE]') {
+              continue;
+            }
+            
+            try {
+              const event = JSON.parse(data);
+              
+              if (event.choices && event.choices[0] && event.choices[0].delta) {
+                const delta = event.choices[0].delta;
+                
+                if (delta.content) {
+                  chars += delta.content.length;
+                  send(chunk({ content: delta.content }));
+                }
+              }
+            } catch (e) {
+              continue;
+            }
           }
         }
       }
@@ -337,11 +461,10 @@ async function handleStreamingRequest(req, res, client, prompt, model, completio
     // Send done marker
     res.write('data: [DONE]\n\n');
     
-    console.log(`DuckAI ${model} stream ${chars} chars in ${(Date.now() - startTime) / 1000}ms`);
+    console.log(`[${providerName}] ${model} stream ${chars} chars in ${(Date.now() - startTime) / 1000}ms`);
   } catch (error) {
-    console.error('Streaming error:', error);
+    console.error(`[${providerName}] Streaming error:`, error);
     
-    // Try to send error as SSE
     try {
       const errorPayload = {
         error: {
@@ -362,12 +485,19 @@ async function handleStreamingRequest(req, res, client, prompt, model, completio
 /**
  * Handle non-streaming chat completion request
  */
-async function handleNonStreamingRequest(res, client, prompt, model, completionId, created) {
+async function handleNonStreamingRequest(res, client, prompt, model, providerName, completionId, created) {
   const startTime = Date.now();
   
   try {
-    // Get the complete response
-    const text = await client.ask(prompt, { model });
+    let text;
+    
+    if (providerName === 'duckai') {
+      // DuckAI uses custom client
+      text = await client.ask(prompt, { model });
+    } else {
+      // Other providers use standard client
+      text = await client.ask(prompt, { model });
+    }
     
     // Estimate token counts (approximate: 4 chars per token)
     const promptTokens = Math.max(1, Math.floor(prompt.length / 4));
@@ -396,12 +526,16 @@ async function handleNonStreamingRequest(res, client, prompt, model, completionI
     
     res.json(response);
     
-    console.log(`DuckAI ${model} non-stream ${text.length} chars in ${(Date.now() - startTime) / 1000}ms`);
+    console.log(`[${providerName}] ${model} non-stream ${text.length} chars in ${(Date.now() - startTime) / 1000}ms`);
   } catch (error) {
-    console.error('Non-streaming error:', error);
+    console.error(`[${providerName}] Non-streaming error:`, error);
     
     if (error instanceof DuckAIError) {
       const status = error.status === 418 ? 429 : 502;
+      throw error;
+    }
+    
+    if (error.name === 'MistralError' || error.name === 'GroqError' || error.name === 'OpenRouterError') {
       throw error;
     }
     
@@ -434,7 +568,8 @@ startRateLimitCleanup();
 // Start server
 const server = app.listen(PORT, HOST, () => {
   console.log(`Vibe.Ai server listening on http://${HOST}:${PORT}/v1`);
-  console.log(`Provider: duckai`);
+  console.log(`Default provider: ${DEFAULT_PROVIDER}`);
+  console.log(`Available providers: ${getProviderNames().join(', ')}`);
   console.log(`API Key: ${isApiKeyRequired() ? 'required' : 'optional (public mode)'}`);
   console.log(`Health check: http://${HOST}:${PORT}/health`);
 });

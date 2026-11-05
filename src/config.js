@@ -66,12 +66,21 @@ export const RATE_LIMIT_WINDOW = getEnvNumber('VIBE_RATE_LIMIT_WINDOW', 60000); 
 export const MAX_PROMPT_CHARS = getEnvNumber('VIBE_MAX_PROMPT_CHARS', 15000);
 export const REQUEST_TIMEOUT = getEnvNumber('VIBE_REQUEST_TIMEOUT', 180000); // 3 minutes
 
-// Upstream configuration (DuckAI specific)
+// Upstream configuration
 export const UPSTREAM_MAX_CONCURRENT = getEnvNumber('VIBE_UPSTREAM_MAX_CONCURRENT', 1);
 export const UPSTREAM_RETRY_DELAY = getEnvNumber('VIBE_UPSTREAM_RETRY_DELAY', 2000);
 
 // Provider configuration
 export const DEFAULT_PROVIDER = getEnv('VIBE_DEFAULT_PROVIDER', 'duckai');
+
+// Provider-specific API keys
+export const MISTRAL_API_KEY = getEnv('MISTRAL_API_KEY', '').trim();
+export const GROQ_API_KEY = getEnv('GROQ_API_KEY', '').trim();
+export const OPENROUTER_API_KEY = getEnv('OPENROUTER_API_KEY', '').trim();
+
+// OpenRouter site configuration (for attribution)
+export const OPENROUTER_SITE_URL = getEnv('OPENROUTER_SITE_URL', null);
+export const OPENROUTER_SITE_NAME = getEnv('OPENROUTER_SITE_NAME', null);
 
 // Logging
 export const LOG_LEVEL = getEnv('VIBE_LOG_LEVEL', 'info'); // debug, info, warn, error
@@ -89,6 +98,48 @@ export const CORS_ORIGIN = getEnv('VIBE_CORS_ORIGIN', '*');
  */
 export function isApiKeyRequired() {
   return REQUIRE_API_KEY || (API_KEY && API_KEY.length > 0);
+}
+
+/**
+ * Check if a specific provider has its API key configured
+ * 
+ * @param {string} provider - Provider name
+ * @returns {boolean} True if provider API key is configured
+ */
+export function hasProviderApiKey(provider) {
+  switch (provider) {
+    case 'mistral':
+      return !!(MISTRAL_API_KEY);
+    case 'groq':
+      return !!(GROQ_API_KEY);
+    case 'openrouter':
+      return !!(OPENROUTER_API_KEY);
+    case 'duckai':
+      return true; // DuckAI doesn't require an API key
+    default:
+      return false;
+  }
+}
+
+/**
+ * Get the API key for a specific provider
+ * 
+ * @param {string} provider - Provider name
+ * @returns {string} The API key or empty string
+ */
+export function getProviderApiKey(provider) {
+  switch (provider) {
+    case 'mistral':
+      return MISTRAL_API_KEY;
+    case 'groq':
+      return GROQ_API_KEY;
+    case 'openrouter':
+      return OPENROUTER_API_KEY;
+    case 'duckai':
+      return ''; // DuckAI doesn't use an API key
+    default:
+      return '';
+  }
 }
 
 /**
@@ -110,7 +161,12 @@ export function getConfig() {
     upstreamRetryDelay: UPSTREAM_RETRY_DELAY,
     defaultProvider: DEFAULT_PROVIDER,
     logLevel: LOG_LEVEL,
-    corsOrigin: CORS_ORIGIN
+    corsOrigin: CORS_ORIGIN,
+    mistralApiKey: MISTRAL_API_KEY,
+    groqApiKey: GROQ_API_KEY,
+    openrouterApiKey: OPENROUTER_API_KEY,
+    openrouterSiteUrl: OPENROUTER_SITE_URL,
+    openrouterSiteName: OPENROUTER_SITE_NAME
   };
 }
 
@@ -140,5 +196,7 @@ export function validateConfig() {
 export default {
   getConfig,
   validateConfig,
-  isApiKeyRequired
+  isApiKeyRequired,
+  hasProviderApiKey,
+  getProviderApiKey
 };
